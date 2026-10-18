@@ -154,6 +154,18 @@ canvas{display:block; width:100%; height:100%;}
 
 <button id="configBtn" title="設定">⚙</button>
 <div id="configPanel" class="panel hidden">
+  <p class="section-title">🕶 ARの設定</p>
+  <div class="check-row">
+    <input type="checkbox" id="arRealToggle">
+    <label for="arRealToggle">ディスプレイの外側を現実（カメラ映像）にする</label>
+  </div>
+  <small>オフにすると、外側は暗い空間に目印の線だけが出ます（カメラの許可も出ません）。</small>
+  <div class="check-row">
+    <input type="checkbox" id="arMoveToggle">
+    <label for="arMoveToggle">ステージが変わるとき、ディスプレイが左右に動く</label>
+  </div>
+  <small>ARで2人のときは、ホストの設定が使われます。</small>
+  <hr>
   <p class="section-title">🎨 テーマ設定</p>
   <div>
     <label>背景画像</label>
@@ -245,6 +257,7 @@ canvas{display:block; width:100%; height:100%;}
   <p class="subtitle" id="partnerScoreText"></p>
   <p class="subtitle">名前を入力してください</p>
   <input id="nameInputBox" type="text" maxlength="16" placeholder="なまえ">
+  <p class="last-score" style="margin:-6px 0 0 0;">「/」で始まる名前（例: /test）はランキングに記録されません</p>
   <div style="display:flex; gap:12px;">
     <button class="btn" id="confirmNameBtn">けってい</button>
     <button class="btn secondary" id="skipNameBtn">スキップ</button>
@@ -871,6 +884,17 @@ const AR_VIRT_HFOV = 50;            // 仮想ディスプレイの横の広が�
 const AR_CAM_FOV = 60;              // スマホ画面の長い辺が映す広がり(度・目安)
 
 const cfg = { len:60, input:'normal', players:1 };
+// 端末ごとの設定（この端末のブラウザに保存）
+const settings = { arReal:true, arMove:true };
+try{
+  const s = JSON.parse(localStorage.getItem('tw_settings') || '{}');
+  if(typeof s.arReal==='boolean') settings.arReal = s.arReal;
+  if(typeof s.arMove==='boolean') settings.arMove = s.arMove;
+}catch(e){}
+function saveSettings(){ try{ localStorage.setItem('tw_settings', JSON.stringify(settings)); }catch(e){} }
+// 名前がこの文字で始まると、ランキングに記録しない（コマンド）
+const NO_RECORD_PREFIXES = ['/', '／'];
+function isNoRecordName(n){ return NO_RECORD_PREFIXES.some(p=>n.startsWith(p)); }
 function modeKey(){
   const kind = cfg.input==='ar' ? (cfg.players===2 ? 'ar2p' : 'ar') : 'normal';
   return cfg.len + '_' + kind;
@@ -901,7 +925,7 @@ let phase = 'idle';                // idle | intro | play | ended
 let waveOrder = [], waveIdx = 0, waveCount = 3, playTime = 18.5;
 let waveTimeLeft = 0, introT = 0, pendingMod = 0, warned = false;
 let scores = [0,0];                // [ホスト/ひとり, ゲスト]
-let finalScore = 0, lastScore = 0, lastName = '';
+let finalScore = 0, lastScore = 0, recName = null, recScore = null;
 let controller = null, ghost = null, fx = [], remoteAim = null, hintText = '', lastOwnScore = 0;
 let pointer1 = {x:W()/2, y:H()/2};
 let pointer2 = {x:0, y:0, active:false};
@@ -939,6 +963,7 @@ const camVideo = $('camVideo');
 let arActive = false, camStream = null, gotOrient = false, wakeLock = null;
 let rawYaw=0, rawPitch=0, rawRoll=0, sYaw=0, sPitch=0, sRoll=0, yaw0=0, pitch0=0;
 const aim = {x:VW/2, y:VH/2};
+let dispYaw = 0, dispFrom = 0, dispTo = 0;   // ディスプレイが正面からどれだけ左右にずれているか(度)
 const vcanvas = document.createElement('canvas'); vcanvas.width = VW; vcanvas.height = VH;
 const vctx = vcanvas.getContext('2d');
 
@@ -984,12 +1009,24 @@ function stepAim(){
   while(dr>Math.PI) dr-=2*Math.PI; while(dr<-Math.PI) dr+=2*Math.PI;
   sRoll += dr*0.3;
   const ppd = VW/AR_VIRT_HFOV;
-  aim.x = VW/2 + angDiff(sYaw, yaw0)*ppd;
+  aim.x = VW/2 + angDiff(sYaw, yaw0 + dispYaw)*ppd;
   aim.y = VH/2 - (sPitch - pitch0)*ppd;
 }
 function calibrate(){
   sYaw = rawYaw; sPitch = rawPitch; sRoll = rawRoll;
-  yaw0 = sYaw; pitch0 = sPitch;
+  yaw0 = sYaw - dispYaw; pitch0 = sPitch;     // 今向いている先がディスプレイの中心になる
+}
+async function startCamera(){
+  if(camStream) return;
+  try{
+    camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
+    camVideo.srcObject = camStream; await camVideo.play();
+  }catch(e){ camStream = null; showToast('カメラが使えないため、現実の映像なしで進めます'); }
+  camVideo.classList.toggle('hidden', !camStream);
+}
+function stopCamera(){
+  if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream = null; }
+  camVideo.srcObject = null; camVideo.classList.add('hidden');
 }
 async function enableAR(){
   try{
@@ -1006,26 +1043,32 @@ async function enableAR(){
     showToast('傾きセンサーが使えません（PCではARは使えません）');
     return false;
   }
-  if(!camStream){
-    try{
-      camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
-      camVideo.srcObject = camStream; await camVideo.play();
-    }catch(e){ camStream = null; showToast('カメラが使えないため、背景画像のみで進めます'); }
-  }
-  camVideo.classList.toggle('hidden', !camStream);
+  dispYaw = dispFrom = dispTo = 0;
+  if(settings.arReal) await startCamera(); else stopCamera();
   arActive = true; calibrate();
   try{ if(navigator.wakeLock) wakeLock = await navigator.wakeLock.request('screen'); }catch(e){}
   return true;
 }
 function disableAR(){
   window.removeEventListener('deviceorientation', onOrient, true);
-  if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream = null; }
-  camVideo.srcObject = null; camVideo.classList.add('hidden');
+  stopCamera(); dispYaw = dispFrom = dispTo = 0;
   try{ if(wakeLock){ wakeLock.release(); wakeLock = null; } }catch(e){}
   arActive = false; gotOrient = false;
 }
+function drawARBackdrop(){
+  const w=W(), h=H();
+  const g = ctx.createLinearGradient(0,0,0,h); g.addColorStop(0,'#0b1626'); g.addColorStop(1,'#1b2b45');
+  ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+  const pxd = Math.max(w,h)/AR_CAM_FOV, R = Math.hypot(w,h);
+  ctx.save(); ctx.translate(w/2,h/2); ctx.rotate(-sRoll);
+  ctx.strokeStyle = 'rgba(140,190,255,.18)'; ctx.lineWidth = 1.5;
+  for(let k=0;k<24;k++){ const x = angDiff(k*15, sYaw)*pxd; if(Math.abs(x)>R) continue; ctx.beginPath(); ctx.moveTo(x,-R); ctx.lineTo(x,R); ctx.stroke(); }
+  for(let p=-6;p<=6;p++){ const y = -(p*15 - sPitch)*pxd; if(Math.abs(y)>R) continue; ctx.beginPath(); ctx.moveTo(-R,y); ctx.lineTo(R,y); ctx.stroke(); }
+  ctx.restore();
+}
+function clearARBack(){ if(camStream) ctx.clearRect(0,0,W(),H()); else drawARBackdrop(); }
 function drawARComposite(){
-  ctx.clearRect(0,0,W(),H());
+  clearARBack();
   const s = (Math.max(W(),H())/AR_CAM_FOV) / (VW/AR_VIRT_HFOV);
   ctx.save();
   ctx.translate(W()/2, H()/2); ctx.rotate(-sRoll); ctx.scale(s,s); ctx.translate(-aim.x, -aim.y);
@@ -1049,21 +1092,32 @@ function beginGame(){            // ひとり or ホスト
   for(let i=idx.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [idx[i],idx[j]]=[idx[j],idx[i]]; }
   waveCount = LEN_CFG[cfg.len].waves; playTime = LEN_CFG[cfg.len].play;
   waveOrder = idx.slice(0, waveCount);
-  waveIdx = 0; scores = [0,0]; fx = []; remoteAim = null; lastOwnScore = 0;
+  waveIdx = 0; scores = [0,0]; fx = []; remoteAim = null; lastOwnScore = 0; dispYaw = dispFrom = dispTo = 0;
   show('startScreen',false); show('lobbyScreen',false); show('resultScreen',false);
   startIntro();
 }
+// 次のステージでディスプレイを置く向き(正面から-70〜+70度。今の位置から40度以上離す)
+function nextDispYaw(){
+  if(!arActive || !settings.arMove) return 0;
+  let t, guard = 0;
+  do{ t = Math.round(rand(-70,70)); }while(Math.abs(t-dispTo) < 40 && ++guard < 50);
+  return t;
+}
 function startIntro(){
   pendingMod = waveOrder[waveIdx];
-  showIntro(pendingMod, waveIdx, waveCount);
-  if(role==='host') sendCtl({t:'intro', mod:pendingMod, idx:waveIdx, n:waveCount});
+  const dy = waveIdx>0 ? nextDispYaw() : 0;
+  showIntro(pendingMod, waveIdx, waveCount, dy);
+  if(role==='host') sendCtl({t:'intro', mod:pendingMod, idx:waveIdx, n:waveCount, dy});
 }
-function showIntro(mod, idx, n){
+function showIntro(mod, idx, n, dy){
   currentWaveEmoji = WAVE_EMOJI[mod];
   $('waveLabelText').textContent = WAVE_LABELS[mod];
-  $('waveSubText').textContent = `STAGE ${idx+1} / ${n}`;
+  waveIdx = idx; waveCount = n;
+  if(idx===0){ dispFrom = dispTo = dispYaw = 0; } else { dispFrom = dispYaw; dispTo = dy||0; }
+  const moved = dispTo - dispFrom;
+  $('waveSubText').textContent = `STAGE ${idx+1} / ${n}` + (arActive && Math.abs(moved)>1 ? (moved<0 ? '　←　ディスプレイが左へ動きます' : '　→　ディスプレイが右へ動きます') : '');
   show('hud',false); show('waveHintBar',false); show('waveIntro',true);
-  sfx.wave(); phase = 'intro'; introT = 0; waveIdx = idx; waveCount = n;
+  sfx.wave(); phase = 'intro'; introT = 0;
 }
 function beginPlay(){
   show('waveIntro',false);
@@ -1114,15 +1168,20 @@ function endGame(){
 
 /* ---------------- 名前入力・結果・ランキング ---------------- */
 async function finishAndSave(name){
-  name = (name||'').trim() || 'ななし';
-  $('confirmNameBtn').disabled = true; $('skipNameBtn').disabled = true;
-  const r = await gasPost({action:'scoreAdd', mode:modeKey(), name, score:finalScore});
-  if(gasReady && !r) showToast('ランキングに接続できませんでした');
-  $('confirmNameBtn').disabled = false; $('skipNameBtn').disabled = false;
-  lastName = name; lastScore = finalScore;
-  await showResult();
+  name = (name||'').trim();
+  const noRecord = isNoRecordName(name);          // 「/」で始まる名前は記録しない
+  if(!noRecord && !name) name = 'ななし';
+  lastScore = finalScore; recName = null; recScore = null;
+  if(!noRecord){
+    $('confirmNameBtn').disabled = true; $('skipNameBtn').disabled = true;
+    const r = await gasPost({action:'scoreAdd', mode:modeKey(), name, score:finalScore});
+    if(gasReady && !r) showToast('ランキングに接続できませんでした');
+    $('confirmNameBtn').disabled = false; $('skipNameBtn').disabled = false;
+    recName = name; recScore = finalScore;
+  }
+  await showResult(noRecord);
 }
-async function showResult(){
+async function showResult(noRecord){
   show('nameScreen',false);
   $('resultScoreText').textContent = `Score: ${finalScore}`;
   const label = (BOARDS.find(b=>b[0]===modeKey())||[,''])[1];
@@ -1131,6 +1190,7 @@ async function showResult(){
   show('resultScreen',true);
   const st = await gasGetState();
   renderRanking((st && st.ranking && st.ranking[modeKey()]) || [], !!st);
+  if(noRecord) $('myRankText').textContent = '記録しない名前のため、ランキングには載せていません';
 }
 function rowHtml(rank,e,mine){
   let color='var(--cream)';
@@ -1144,7 +1204,7 @@ function renderRanking(entries, connected){
   if(!entries.length){ list.innerHTML = '<p class="rank-empty">まだ記録がありません</p>'; return; }
   const sorted = [...entries].sort((a,b)=>b.score-a.score);
   let myRank = null;
-  sorted.forEach((e,i)=>{ if(myRank===null && e.score===lastScore && e.name===lastName) myRank = i+1; });
+  sorted.forEach((e,i)=>{ if(myRank===null && recName!==null && e.score===recScore && e.name===recName) myRank = i+1; });
   list.innerHTML = sorted.slice(0,8).map((e,i)=>rowHtml(i+1,e,(i+1)===myRank)).join('');
   if(myRank) mineEl.textContent = `あなたの順位: #${myRank}`;
 }
@@ -1319,7 +1379,7 @@ function updateLobby(){
 function openLobby(rematch){
   show('startScreen',false); show('lobbyScreen',true);
   show('lobbyChoice', !rematch);
-  myReady = false; peerReady = false;
+  myReady = false; peerReady = false; dispYaw = dispFrom = dispTo = 0;
   if(rematch) updateLobby(); else setLobbyStatus('「部屋を作る」か、相手の番号を入れて「入る」を押してください');
 }
 function onLinkOpen(){ updateLobby(); }
@@ -1333,7 +1393,7 @@ function onLinkMsg(m){
     case 'start':                                    // ゲスト側: ゲーム開始
       cfg.len = m.len; waveCount = m.n; scores = [0,0]; fx = []; remoteAim = null; lastOwnScore = 0;
       show('lobbyScreen',false); show('resultScreen',false); sfx.start(); break;
-    case 'intro': showIntro(m.mod, m.idx, m.n); break;
+    case 'intro': showIntro(m.mod, m.idx, m.n, m.dy); break;
     case 'play':
       ghost = new WAVE_CONTROLLERS[m.mod](VW, VH, m.pt);
       playTime = m.pt; waveTimeLeft = m.pt; fx = []; hintText = ''; phase = 'play';
@@ -1416,7 +1476,7 @@ function netTick(now){
 function render(){
   const inGame = (phase==='play' || phase==='intro');
   if(arActive){
-    if(inGame){ renderWorld(vctx,VW,VH); drawARComposite(); } else ctx.clearRect(0,0,W(),H());
+    if(inGame){ renderWorld(vctx,VW,VH); drawARComposite(); } else clearARBack();
   } else {
     renderWorld(ctx,W(),H());
     if(phase==='play'){
@@ -1428,10 +1488,18 @@ function render(){
 }
 function loop(now){
   const dt = Math.min(0.05, (now-lastT)/1000); lastT = now;
-  if(arActive) stepAim();
+  if(arActive){
+    if(phase==='intro'){
+      const t = Math.min(1, introT/INTRO_SEC), e = t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+      dispYaw = dispFrom + (dispTo - dispFrom)*e;
+    } else if(phase==='play' || phase==='ended'){ dispYaw = dispTo; }
+    stepAim();
+  }
   if(role!=='guest'){
     if(phase==='intro'){ introT += dt; if(introT >= INTRO_SEC) beginPlay(); }
     else if(phase==='play') updatePlay(dt);
+  } else if(phase==='intro'){
+    introT += dt;                                  // ゲストは動きの表示のためだけに時間を進める
   } else if(phase==='play'){
     updateHud(waveTimeLeft); $('waveHintText').textContent = hintText;
     fx = fx.filter(f=>f.update(dt));
@@ -1446,6 +1514,13 @@ function loop(now){
   if(!gasReady) show('gasWarning', true);
   $('configBtn').onclick = ()=> $('configPanel').classList.toggle('hidden');
   $('closeConfigBtn').onclick = ()=> $('configPanel').classList.add('hidden');
+  $('arRealToggle').checked = settings.arReal;
+  $('arMoveToggle').checked = settings.arMove;
+  $('arRealToggle').addEventListener('change', (e)=>{
+    settings.arReal = e.target.checked; saveSettings();
+    if(arActive){ if(settings.arReal) startCamera(); else stopCamera(); }
+  });
+  $('arMoveToggle').addEventListener('change', (e)=>{ settings.arMove = e.target.checked; saveSettings(); });
   requestAnimationFrame(loop);
 })();
 
