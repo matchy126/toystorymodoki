@@ -131,7 +131,9 @@ canvas{display:block; width:100%; height:100%;}
 }
 
 /* ---- v6 追加 ---- */
-#camVideo{position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:-1; background:#000;}
+/* カメラ映像は、ページの背景色より前・ゲーム画面より後ろに置く（以前は背景色の後ろに隠れていた） */
+body{background:transparent;}
+#camVideo{position:fixed; inset:0; width:100%; height:100%; object-fit:cover; z-index:0; background:#000;}
 .setup-col{display:flex; flex-direction:column; gap:12px; align-items:center;}
 .setup-label{font-size:13px; opacity:.8; margin:0 0 4px 0;}
 .seg{display:inline-flex; border-radius:14px; overflow:hidden; border:3px solid var(--wood-dark); background:var(--wood); box-shadow:0 5px 12px rgba(0,0,0,.35);}
@@ -159,7 +161,7 @@ canvas{display:block; width:100%; height:100%;}
     <input type="checkbox" id="arRealToggle">
     <label for="arRealToggle">ディスプレイの外側を現実（カメラ映像）にする</label>
   </div>
-  <small>オフにすると、外側は暗い空間に目印の線だけが出ます（カメラの許可も出ません）。</small>
+  <small>オフにすると、外側は何もない暗い空間になります（カメラの許可も出ません）。</small>
   <div class="check-row">
     <input type="checkbox" id="arMoveToggle">
     <label for="arMoveToggle">ステージが変わるとき、ディスプレイが左右に動く</label>
@@ -1056,15 +1058,8 @@ function disableAR(){
   arActive = false; gotOrient = false;
 }
 function drawARBackdrop(){
-  const w=W(), h=H();
-  const g = ctx.createLinearGradient(0,0,0,h); g.addColorStop(0,'#0b1626'); g.addColorStop(1,'#1b2b45');
-  ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
-  const pxd = Math.max(w,h)/AR_CAM_FOV, R = Math.hypot(w,h);
-  ctx.save(); ctx.translate(w/2,h/2); ctx.rotate(-sRoll);
-  ctx.strokeStyle = 'rgba(140,190,255,.18)'; ctx.lineWidth = 1.5;
-  for(let k=0;k<24;k++){ const x = angDiff(k*15, sYaw)*pxd; if(Math.abs(x)>R) continue; ctx.beginPath(); ctx.moveTo(x,-R); ctx.lineTo(x,R); ctx.stroke(); }
-  for(let p=-6;p<=6;p++){ const y = -(p*15 - sPitch)*pxd; if(Math.abs(y)>R) continue; ctx.beginPath(); ctx.moveTo(-R,y); ctx.lineTo(R,y); ctx.stroke(); }
-  ctx.restore();
+  // 現実オフ: 何もない暗い空間（目印の線もなし）
+  ctx.fillStyle = '#2B2118'; ctx.fillRect(0,0,W(),H());
 }
 function clearARBack(){ if(camStream) ctx.clearRect(0,0,W(),H()); else drawARBackdrop(); }
 function drawARComposite(){
