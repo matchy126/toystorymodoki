@@ -147,6 +147,8 @@ body{background:transparent;}
 #arBar button{font-family:'Fredoka',sans-serif; font-size:14px; padding:8px 14px; border-radius:12px; border:2px solid rgba(255,246,229,.6); background:rgba(43,33,24,.7); color:var(--cream); cursor:pointer;}
 #gasWarning{position:fixed; top:0; left:0; right:0; z-index:200; background:#b91c1c; color:#fff; text-align:center; padding:7px 12px; font-family:'Nunito',sans-serif; font-size:13px;}
 .lobby-status{white-space:pre-line; font-size:clamp(15px,2.4vw,20px); font-weight:700; margin:0;}
+
+#configPanel select{font-size:14px; padding:8px 10px; border-radius:8px; border:2px solid var(--wood-dark); color:var(--ink); width:100%; font-family:'Nunito',sans-serif;}
 </style>
 </head>
 <body>
@@ -162,6 +164,11 @@ body{background:transparent;}
     <label for="arRealToggle">ディスプレイの外側を現実（カメラ映像）にする</label>
   </div>
   <small>オフにすると、外側は何もない暗い空間になります（カメラの許可も出ません）。</small>
+  <div>
+    <label>使うカメラ</label>
+    <select id="camSelect"><option value="">自動（背面カメラ優先）</option></select>
+  </div>
+  <small id="camHint"></small>
   <div class="check-row">
     <input type="checkbox" id="arMoveToggle">
     <label for="arMoveToggle">ステージが変わるとき、ディスプレイが左右に動く</label>
@@ -300,7 +307,7 @@ body{background:transparent;}
    ============================================================ */
 
 // ▼▼▼ GASをデプロイして発行された /exec のURLを、下の "" の中に貼り付ける ▼▼▼
-const GAS_URL = "https://script.google.com/macros/s/AKfycbxTQi-7gUU3dkHDLX1NAPcCSA-ltIWOPpTqwOzfH6mT_ENlD4qQbfOkLqJr3PJk_bM2sw/exec";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbxLVvb7bRW2bb3LMmHKijziBZBIOY308JJqxsknqw9vSyyNbv-0dmiAC5MPYhAaPAXnfA/exec";
 // ▲▲▲ （テスト用に ?gas=URL をアドレスの後ろに付けても指定できます）▲▲▲
 
 const _qs = new URLSearchParams(location.search);
@@ -887,11 +894,12 @@ const AR_CAM_FOV = 60;              // スマホ画面の長い辺が映す広�
 
 const cfg = { len:60, input:'normal', players:1 };
 // 端末ごとの設定（この端末のブラウザに保存）
-const settings = { arReal:true, arMove:true };
+const settings = { arReal:true, arMove:true, camId:'' };
 try{
   const s = JSON.parse(localStorage.getItem('tw_settings') || '{}');
   if(typeof s.arReal==='boolean') settings.arReal = s.arReal;
   if(typeof s.arMove==='boolean') settings.arMove = s.arMove;
+  if(typeof s.camId==='string') settings.camId = s.camId;
 }catch(e){}
 function saveSettings(){ try{ localStorage.setItem('tw_settings', JSON.stringify(settings)); }catch(e){} }
 // 名前がこの文字で始まると、ランキングに記録しない（コマンド）
@@ -1020,11 +1028,34 @@ function calibrate(){
 }
 async function startCamera(){
   if(camStream) return;
-  try{
-    camStream = await navigator.mediaDevices.getUserMedia({ video:{ facingMode:{ideal:'environment'} }, audio:false });
-    camVideo.srcObject = camStream; await camVideo.play();
-  }catch(e){ camStream = null; showToast('カメラが使えないため、現実の映像なしで進めます'); }
+  const tries = [];
+  if(settings.camId) tries.push({ video:{ deviceId:{ exact:settings.camId } }, audio:false });   // 選んだカメラ
+  tries.push({ video:{ facingMode:{ ideal:'environment' } }, audio:false });                       // 自動(背面優先)
+  let usedChosen = false;
+  for(let i=0; i<tries.length && !camStream; i++){
+    try{ camStream = await navigator.mediaDevices.getUserMedia(tries[i]); usedChosen = (settings.camId && i===0); }
+    catch(e){ camStream = null; }
+  }
+  if(camStream){
+    camVideo.srcObject = camStream;
+    try{ await camVideo.play(); }catch(e){}
+    if(settings.camId && !usedChosen) showToast('選んだカメラが使えないため、自動で選びました');
+  } else {
+    showToast('カメラが使えないため、現実の映像なしで進めます');
+  }
   camVideo.classList.toggle('hidden', !camStream);
+  refreshCameraList();                      // 許可が出たあとは、カメラの名前が分かる
+}
+async function refreshCameraList(){
+  const sel = $('camSelect'); if(!sel) return;
+  let devs = [];
+  try{ devs = (await navigator.mediaDevices.enumerateDevices()).filter(d=>d.kind==='videoinput' && d.deviceId); }catch(e){}
+  while(sel.options.length > 1) sel.remove(1);
+  devs.forEach((d,i)=>{ const o = document.createElement('option'); o.value = d.deviceId; o.textContent = d.label || ('カメラ ' + (i+1)); sel.appendChild(o); });
+  sel.value = devs.some(d=>d.deviceId===settings.camId) ? settings.camId : '';
+  $('camHint').textContent = devs.length
+    ? 'PCのカメラは、通常、手前向き（フロント）です。USBカメラなどがあれば、ここで選べます。'
+    : '一度カメラを許可すると、使えるカメラの一覧がここに出ます。PCのカメラは、通常、手前向き（フロント）です。';
 }
 function stopCamera(){
   if(camStream){ camStream.getTracks().forEach(t=>t.stop()); camStream = null; }
@@ -1507,7 +1538,12 @@ function loop(now){
 (function init(){
   loadTheme();
   if(!gasReady) show('gasWarning', true);
-  $('configBtn').onclick = ()=> $('configPanel').classList.toggle('hidden');
+  $('configBtn').onclick = ()=>{ $('configPanel').classList.toggle('hidden'); refreshCameraList(); };
+  refreshCameraList();
+  $('camSelect').addEventListener('change', async (e)=>{
+    settings.camId = e.target.value; saveSettings();
+    if(arActive && settings.arReal){ stopCamera(); await startCamera(); }
+  });
   $('closeConfigBtn').onclick = ()=> $('configPanel').classList.add('hidden');
   $('arRealToggle').checked = settings.arReal;
   $('arMoveToggle').checked = settings.arMove;
