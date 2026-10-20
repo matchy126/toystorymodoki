@@ -143,8 +143,8 @@ body{background:transparent;}
 .join-row{display:flex; gap:8px; justify-content:center; align-items:center; margin-top:10px;}
 #joinCodeInput{font-family:'Nunito',sans-serif; font-size:22px; font-weight:700; padding:10px 14px; border-radius:10px; border:3px solid var(--denim); width:150px; text-align:center; color:var(--ink);}
 .row{display:flex; gap:12px; justify-content:center; flex-wrap:wrap;}
-#arBar{position:fixed; bottom:14px; right:14px; z-index:30;}
-#arBar button{font-family:'Fredoka',sans-serif; font-size:14px; padding:8px 14px; border-radius:12px; border:2px solid rgba(255,246,229,.6); background:rgba(43,33,24,.7); color:var(--cream); cursor:pointer;}
+#arBar, #specBar{position:fixed; bottom:14px; right:14px; z-index:30;}
+#arBar button, #specBar button{font-family:'Fredoka',sans-serif; font-size:14px; padding:8px 14px; border-radius:12px; border:2px solid rgba(255,246,229,.6); background:rgba(43,33,24,.7); color:var(--cream); cursor:pointer;}
 #gasWarning{position:fixed; top:0; left:0; right:0; z-index:200; background:#b91c1c; color:#fff; text-align:center; padding:7px 12px; font-family:'Nunito',sans-serif; font-size:13px;}
 .lobby-status{white-space:pre-line; font-size:clamp(15px,2.4vw,20px); font-weight:700; margin:0;}
 
@@ -207,6 +207,7 @@ body{background:transparent;}
 </div>
 <div id="waveHintBar" class="hidden"><span class="chip" id="waveHintText"></span></div>
 <div id="arBar" class="hidden"><button id="recenterBtn">中央に合わせる</button></div>
+<div id="specBar" class="hidden"><button id="leaveWatchBtn">観戦をやめる</button></div>
 
 <div id="startScreen" class="overlay interactive">
   <h1 class="big-title title-font">2-4's TOY WORLD</h1>
@@ -232,9 +233,16 @@ body{background:transparent;}
         <button data-v="2">2人（通信）</button>
       </div>
     </div>
+    <div id="watchRow" class="hidden">
+      <div class="check-row" style="justify-content:center;">
+        <input type="checkbox" id="watchToggle">
+        <label for="watchToggle">観戦を受け付ける（番号を出します）</label>
+      </div>
+    </div>
   </div>
   <button class="btn" id="startBtn">スタート</button>
   <button class="btn secondary" id="scoreboardBtn">🏆 スコアボード</button>
+  <button class="btn secondary" id="watchBtn">👀 観戦する</button>
   <p class="last-score" id="lastScoreText"></p>
 </div>
 
@@ -253,6 +261,19 @@ body{background:transparent;}
     <button class="btn hidden" id="lobbyStartBtn">スタート</button>
   </div>
   <button class="btn secondary" id="lobbyBackBtn" style="padding:10px 24px;">もどる</button>
+</div>
+
+<div id="watchScreen" class="overlay interactive hidden">
+  <h2 class="title-font" style="font-size:clamp(28px,5vw,48px); color:var(--mustard); margin:0;">観戦する</h2>
+  <div id="watchChoice">
+    <p class="subtitle">遊んでいる人から聞いた、4けたの番号を入れてください</p>
+    <div class="join-row">
+      <input id="watchCodeInput" inputmode="numeric" maxlength="4" placeholder="4けたの番号">
+      <button class="btn" id="watchJoinBtn" style="padding:10px 22px;">観戦する</button>
+    </div>
+  </div>
+  <p class="lobby-status" id="watchStatus"></p>
+  <button class="btn secondary" id="watchBackBtn" style="padding:10px 24px;">もどる</button>
 </div>
 
 <div id="waveIntro" class="overlay hidden">
@@ -923,6 +944,16 @@ async function gasPost(payload){
     try{ return await r.json(); }catch(e){ return {ok:true}; }
   }catch(e){ console.error('post failed', e); return null; }
 }
+async function watchersGet(room){
+  if(!gasReady) return [];
+  try{ const r = await fetch(`${gasUrl}?api=signal&room=${room}&kind=watchers`); const d = await r.json(); return d.list || []; }
+  catch(e){ return []; }
+}
+async function wanswerGet(room, wid){
+  if(!gasReady) return null;
+  try{ const r = await fetch(`${gasUrl}?api=signal&room=${room}&kind=wanswer&wid=${wid}`); const d = await r.json(); return d.data || null; }
+  catch(e){ return null; }
+}
 async function signalGet(room, kind){
   if(!gasReady) return null;
   try{ const r = await fetch(`${gasUrl}?api=signal&room=${room}&kind=${kind}`); const d = await r.json(); return d.data || null; }
@@ -930,7 +961,7 @@ async function signalGet(room, kind){
 }
 
 /* ---------------- ゲームの状態 ---------------- */
-let role = 'solo';                 // solo | host | guest
+let role = 'solo';                 // solo | host | guest | spectator
 let phase = 'idle';                // idle | intro | play | ended
 let waveOrder = [], waveIdx = 0, waveCount = 3, playTime = 18.5;
 let waveTimeLeft = 0, introT = 0, pendingMod = 0, warned = false;
@@ -940,6 +971,14 @@ let controller = null, ghost = null, fx = [], remoteAim = null, hintText = '', l
 let pointer1 = {x:W()/2, y:H()/2};
 let pointer2 = {x:0, y:0, active:false};
 function me(){ return role==='guest' ? 1 : 0; }
+// 観戦まわり
+let roomCode = '';                 // ホストの部屋番号（観戦の受付も、この番号）
+let watchers = [];                 // ホスト側: 観戦者とのつながり
+const MAX_WATCHERS = 4;
+let WATCH_POLL_MS = 2000;          // ホストが観戦者の受付を見に行く間隔
+let specAimH = null, specAimG = null;   // 観戦側: ホストとゲストの照準
+let ghostMod = -1;                 // 今の「ゴースト」が、どのステージのものか
+let specRankTimer = null;
 
 /* ---------------- 描画の道具 ---------------- */
 function drawCrosshair(c,x,y,color){
@@ -960,11 +999,14 @@ function drawBackgroundTo(c,w,h){
 }
 function renderWorld(c,w,h){
   drawBackgroundTo(c,w,h);
-  const wc = role==='guest' ? ghost : controller;
+  const wc = (role==='guest' || role==='spectator') ? ghost : controller;
   if(phase==='play' && wc){
     wc.draw(c);
     fx.forEach(f=>f.draw(c));
-    if(remoteAim) drawCrosshair(c, remoteAim.x, remoteAim.y, '#E4572E');
+    if(role==='spectator'){
+      if(specAimH) drawCrosshair(c, specAimH.x, specAimH.y, '#FFE45C');
+      if(specAimG) drawCrosshair(c, specAimG.x, specAimG.y, '#E4572E');
+    } else if(remoteAim) drawCrosshair(c, remoteAim.x, remoteAim.y, '#E4572E');
   }
 }
 
@@ -1156,7 +1198,9 @@ function beginPlay(){
 }
 function updateHud(tl){
   $('timeLeft').textContent = `STAGE ${waveIdx+1}/${waveCount} ・ 残り ${Math.max(0,Math.ceil(tl))}s`;
-  $('scoreNow').textContent = role==='solo' ? `SCORE ${scores[0]}` : `YOU ${scores[me()]} ／ 相手 ${scores[1-me()]}`;
+  const two = (cfg.players===2);
+  $('scoreNow').textContent = !two ? `SCORE ${scores[0]}`
+    : (role==='spectator' ? `ホスト ${scores[0]} ／ ゲスト ${scores[1]}` : `YOU ${scores[me()]} ／ 相手 ${scores[1-me()]}`);
 }
 function updatePlay(dt){
   waveTimeLeft -= dt;
@@ -1185,7 +1229,7 @@ function endGame(){
   show('hud',false); show('waveHintBar',false); show('arBar',false); show('waveIntro',false);
   if(role==='host') sendCtl({t:'end', sc:scores});
   finalScore = scores[me()];
-  $('partnerScoreText').textContent = role==='solo' ? '' : `相手: ${scores[1-me()]} ／ 合計: ${scores[0]+scores[1]}`;
+  $('partnerScoreText').textContent = cfg.players===2 ? `相手: ${scores[1-me()]} ／ 合計: ${scores[0]+scores[1]}` : '';
   $('finalScoreText').textContent = `Score: ${finalScore}`;
   $('nameInputBox').value = '';
   controller = null; ghost = null; remoteAim = null;
@@ -1208,6 +1252,7 @@ async function finishAndSave(name){
   await showResult(noRecord);
 }
 async function showResult(noRecord){
+  $('playAgainBtn').textContent = 'もう一度あそぶ';
   show('nameScreen',false);
   $('resultScoreText').textContent = `Score: ${finalScore}`;
   const label = (BOARDS.find(b=>b[0]===modeKey())||[,''])[1];
@@ -1238,12 +1283,16 @@ $('confirmNameBtn').addEventListener('click', ()=>finishAndSave($('nameInputBox'
 $('skipNameBtn').addEventListener('click', ()=>finishAndSave(''));
 $('nameInputBox').addEventListener('keydown', (e)=>{ if(e.key==='Enter') finishAndSave($('nameInputBox').value); });
 $('playAgainBtn').addEventListener('click', ()=>{
+  if(role==='spectator'){ leaveToStart(); return; }
   show('resultScreen',false); phase = 'idle';
-  if(role!=='solo' && link && link.open){ openLobby(true); }
+  if(role==='host' && roomCode && (cfg.players===1 || (link && link.open))){ openLobby(true); }   // 部屋を残したまま、準備の画面へ
+  else if(role==='guest' && link && link.open){ openLobby(true); }
   else { leaveToStart(); }
 });
 function leaveToStart(){
-  closeLink(); role = 'solo'; phase = 'idle';
+  closeLink(); closeWatchers(); roomCode = ''; role = 'solo'; phase = 'idle';
+  clearInterval(specRankTimer); specRankTimer = null; specAimH = specAimG = null; ghost = null; ghostMod = -1;
+  show('watchScreen',false); show('specBar',false); show('watchChoice',true); $('watchStatus').textContent = '';
   disableAR();
   show('hud',false); show('waveHintBar',false); show('arBar',false); show('waveIntro',false);
   show('lobbyScreen',false); show('nameScreen',false); show('resultScreen',false);
@@ -1265,8 +1314,9 @@ bindSeg('segLen', v=>{ cfg.len = +v; });
 bindSeg('segInput', v=>{
   cfg.input = v; show('segPlayersRow', v==='ar');
   if(v!=='ar'){ cfg.players = 1; setSeg('segPlayers',1); }
+  updateWatchRow();
 });
-bindSeg('segPlayers', v=>{ cfg.players = +v; });
+bindSeg('segPlayers', v=>{ cfg.players = +v; updateWatchRow(); });
 
 $('startBtn').addEventListener('click', ()=>{ startRequested(); });
 async function startRequested(){
@@ -1275,8 +1325,13 @@ async function startRequested(){
     const ok = await enableAR();       // 許可のダイアログは、ボタンを押した直後に出す必要がある
     if(!ok) return;
     if(cfg.players===2){ openLobby(false); return; }
+    if($('watchToggle').checked){ await startWatchRoom(); return; }
   }
   role = 'solo'; beginGame();
+}
+function updateWatchRow(){
+  const on = (cfg.input==='ar' && cfg.players===1);
+  show('watchRow', on); if(!on) $('watchToggle').checked = false;
 }
 
 canvas.addEventListener('pointermove', (e)=>{
@@ -1287,7 +1342,7 @@ canvas.addEventListener('pointermove', (e)=>{
   if(!e.isPrimary) pointer2.active = true;
 });
 canvas.addEventListener('pointerdown', (e)=>{
-  if(phase!=='play') return;
+  if(phase!=='play' || role==='spectator') return;
   if(arActive){ fireAR(); return; }
   const r = canvas.getBoundingClientRect();
   const x = e.clientX - r.left, y = e.clientY - r.top;
@@ -1366,12 +1421,47 @@ class Link{
     const put = await gasPost({action:'signalPut', room, kind:'answer', data:JSON.stringify(pc.localDescription)});
     if(!put || put.ok===false) throw new Error('signal put failed');
   }
-  send(ch, obj){ try{ if(ch && ch.readyState==='open') ch.send(JSON.stringify(obj)); }catch(e){} }
+  sendRaw(ch, str){ try{ if(ch && ch.readyState==='open') ch.send(str); }catch(e){} }
+  send(ch, obj){ this.sendRaw(ch, JSON.stringify(obj)); }
+  // 観戦する側: 自分から「つなぎたい」と申し込む
+  async watch(room){
+    const wid = Math.random().toString(36).slice(2,10).padEnd(6,'x');
+    const pc = this._pc();
+    this.ctl = pc.createDataChannel('ctl');
+    this.fast = pc.createDataChannel('fast', {ordered:false, maxRetransmits:0});
+    this._wire(this.ctl); this._wire(this.fast);
+    await pc.setLocalDescription(await pc.createOffer());
+    await gatherDone(pc);
+    const put = await gasPost({action:'signalPut', room, kind:'woffer', wid, data:JSON.stringify(pc.localDescription)});
+    if(!put || put.ok===false) throw new Error('signal put failed');
+    for(let i=0; i<40 && !this.dead; i++){
+      const ans = await wanswerGet(room, wid);
+      if(ans){
+        if(ans==='FULL') throw new Error('full');
+        await pc.setRemoteDescription(JSON.parse(ans)); return;
+      }
+      await sleep(1000);
+    }
+    throw new Error('timeout');
+  }
+  // ホスト側: 観戦の申し込みに返事をする
+  async answerWatch(room, wid, offer){
+    const pc = this._pc();
+    pc.ondatachannel = (e)=>{
+      if(e.channel.label==='ctl') this.ctl = e.channel; else this.fast = e.channel;
+      this._wire(e.channel); this._check();
+    };
+    await pc.setRemoteDescription(JSON.parse(offer));
+    await pc.setLocalDescription(await pc.createAnswer());
+    await gatherDone(pc);
+    await gasPost({action:'signalPut', room, kind:'wanswer', wid, data:JSON.stringify(pc.localDescription)});
+  }
   close(){ this.dead = true; try{ if(this.ctl) this.ctl.close(); if(this.fast) this.fast.close(); if(this.pc) this.pc.close(); }catch(e){} }
 }
 let link = null, myReady = false, peerReady = false;
-function sendCtl(o){ if(link) link.send(link.ctl, o); }
-function sendFast(o){ if(link) link.send(link.fast, o); }
+function peerLinks(){ const t = []; if(link) t.push(link); watchers.forEach(w=>t.push(w)); return t; }
+function sendCtl(o){ const s = JSON.stringify(o); peerLinks().forEach(l=>l.sendRaw(l.ctl, s)); }
+function sendFast(o){ const s = JSON.stringify(o); peerLinks().forEach(l=>l.sendRaw(l.fast, s)); }
 function closeLink(){ if(link){ link.close(); link = null; } myReady = false; peerReady = false; }
 
 // 的の状態を送るとき、画像は番号に置き換える(受け取った側が自分の画像から選ぶ)
@@ -1381,7 +1471,7 @@ function snapReviver(k,v){
   return v;
 }
 function applySnapshot(m){
-  if(!ghost) return;
+  if(!ghost || (m.md!==undefined && m.md!==ghostMod)) return;
   try{ Object.assign(ghost, JSON.parse(m.w, snapReviver)); }catch(e){ return; }
   scores = m.sc; waveTimeLeft = m.tl; hintText = m.hint; remoteAim = m.ha;
   fx = (m.fx||[]).map(o=>Object.assign(new HitScore(o.x,o.y,o.score,o.color), {t:o.t}));
@@ -1390,18 +1480,30 @@ function applySnapshot(m){
 }
 
 function setLobbyStatus(t){ $('lobbyStatus').textContent = t; }
+function roomLine(){
+  const n = watchers.filter(w=>w.open).length;
+  return roomCode ? `\n部屋の番号: ${roomCode}　観戦: ${n}人` : '';
+}
 function updateLobby(){
+  const isHost = role==='host';
+  if(isHost && cfg.players===1){                  // ひとりで遊んで、観戦を受け付ける
+    show('readyBtn', false); show('lobbyStartBtn', true); $('lobbyStartBtn').disabled = false;
+    setLobbyStatus('観戦する人に、この番号を伝えてください。\n準備ができたら、正面を向いて「スタート」を押してください' + roomLine());
+    return;
+  }
   const open = !!(link && link.open);
   show('readyBtn', open && !myReady);
-  const isHost = role==='host';
   show('lobbyStartBtn', open && isHost);
   $('lobbyStartBtn').disabled = !(myReady && peerReady);
   if(open){
-    if(!myReady) setLobbyStatus('つながりました。\n正面（遊ぶ向き）にスマホを向けて「準備OK」を押してください');
-    else if(!peerReady) setLobbyStatus('相手の準備を待っています…');
-    else setLobbyStatus(isHost ? '2人とも準備OK！「スタート」を押してください' : 'ホストの開始を待っています…');
+    if(!myReady) setLobbyStatus('つながりました。\n正面（遊ぶ向き）にスマホを向けて「準備OK」を押してください' + (isHost ? roomLine() : ''));
+    else if(!peerReady) setLobbyStatus('相手の準備を待っています…' + (isHost ? roomLine() : ''));
+    else setLobbyStatus(isHost ? '2人とも準備OK！「スタート」を押してください' + roomLine() : 'ホストの開始を待っています…');
+  } else if(isHost && roomCode){
+    setLobbyStatus('相手にこの番号を入力してもらってください…' + roomLine());
   }
 }
+function updateLobbyIfVisible(){ if(!$('lobbyScreen').classList.contains('hidden')) updateLobby(); }
 function openLobby(rematch){
   show('startScreen',false); show('lobbyScreen',true);
   show('lobbyChoice', !rematch);
@@ -1421,7 +1523,7 @@ function onLinkMsg(m){
       show('lobbyScreen',false); show('resultScreen',false); sfx.start(); break;
     case 'intro': showIntro(m.mod, m.idx, m.n, m.dy); break;
     case 'play':
-      ghost = new WAVE_CONTROLLERS[m.mod](VW, VH, m.pt);
+      ghost = new WAVE_CONTROLLERS[m.mod](VW, VH, m.pt); ghostMod = m.mod;
       playTime = m.pt; waveTimeLeft = m.pt; fx = []; hintText = ''; phase = 'play';
       show('waveIntro',false); show('hud',true); show('waveHintBar',true); show('arBar',true); break;
     case 's': if(role==='guest') applySnapshot(m); break;
@@ -1435,7 +1537,8 @@ async function createRoom(){
   closeLink(); role = 'host';
   const room = String(Math.floor(1000 + Math.random()*9000));
   show('lobbyChoice', false);
-  setLobbyStatus(`部屋の番号: ${room}\n相手にこの番号を入力してもらってください…`);
+  setLobbyStatus(`部屋の番号: ${room}\n相手にこの番号を入力してもらってください…\n（観戦する人も、同じ番号を使います）`);
+  openRoomForWatchers(room);
   link = new Link(); link.onmsg = onLinkMsg; link.onopen = onLinkOpen; link.onclose = onLinkClose;
   try{ await link.host(room); }
   catch(e){ if(link && !link.dead){ showToast('つなげませんでした。もう一度やり直してください'); leaveToStart(); } }
@@ -1454,11 +1557,136 @@ $('createRoomBtn').addEventListener('click', createRoom);
 $('joinRoomBtn').addEventListener('click', joinRoom);
 $('readyBtn').addEventListener('click', ()=>{ calibrate(); myReady = true; sendCtl({t:'ready'}); updateLobby(); });
 $('lobbyStartBtn').addEventListener('click', ()=>{
-  if(!(myReady && peerReady)) return;
-  sendCtl({t:'start', len:cfg.len, n:LEN_CFG[cfg.len].waves});
+  if(cfg.players===2){ if(!(myReady && peerReady)) return; }
+  else calibrate();                               // ひとり: 今向いている先が正面
+  sendCtl({t:'start', len:cfg.len, n:LEN_CFG[cfg.len].waves, players:cfg.players});
   beginGame();
 });
 $('lobbyBackBtn').addEventListener('click', ()=>leaveToStart());
+
+/* ---------------- 観戦（ホスト側: 受付 / 観戦側: 表示） ---------------- */
+function closeWatchers(){ watchers.forEach(w=>w.close()); watchers = []; }
+const handledWatch = new Set();
+async function openRoomForWatchers(room){
+  roomCode = room; closeWatchers(); handledWatch.clear();
+  await gasPost({action:'roomOpen', room});
+  watchLoop(room);                                 // 待たずに、受付を続ける
+}
+async function watchLoop(room){
+  while(roomCode===room && role==='host'){
+    await sleep(WATCH_POLL_MS);
+    if(roomCode!==room || role!=='host') break;
+    const list = await watchersGet(room);
+    for(const it of list){
+      if(handledWatch.has(it.id)) continue;
+      handledWatch.add(it.id);
+      if(watchers.length >= MAX_WATCHERS){ gasPost({action:'signalPut', room, kind:'wanswer', wid:it.id, data:'FULL'}); continue; }
+      acceptWatcher(room, it);
+    }
+  }
+}
+function acceptWatcher(room, it){
+  const w = new Link();
+  w.onopen = ()=>{ showToast(`観戦者が入りました（${watchers.filter(x=>x.open).length}人）`); sendSync(w); updateLobbyIfVisible(); };
+  w.onclose = ()=>{
+    watchers = watchers.filter(x=>x!==w);
+    showToast(`観戦者が出ました（${watchers.filter(x=>x.open).length}人）`); updateLobbyIfVisible();
+  };
+  watchers.push(w);
+  w.answerWatch(room, it.id, it.data).catch(()=>{ watchers = watchers.filter(x=>x!==w); w.close(); });
+  setTimeout(()=>{ if(!w.open && !w.dead){ w.close(); watchers = watchers.filter(x=>x!==w); } }, 30000);   // つながらないまま居座らせない
+}
+// 途中から入った観戦者に、今の場面を知らせる
+function sendSync(w){
+  w.send(w.ctl, { t:'sync', len:cfg.len, players:cfg.players, phase, mod:pendingMod, idx:waveIdx, n:waveCount, pt:playTime, tl:waveTimeLeft, sc:scores });
+}
+async function startWatchRoom(){
+  if(!gasReady){ showToast('GASのURLが未設定のため、観戦は使えません。ひとりで始めます'); role = 'solo'; beginGame(); return; }
+  closeLink(); role = 'host';
+  const room = String(Math.floor(1000 + Math.random()*9000));
+  show('startScreen',false); show('lobbyScreen',true); show('lobbyChoice',false);
+  myReady = false; peerReady = false; dispYaw = dispFrom = dispTo = 0;
+  setLobbyStatus('部屋を作っています…');
+  await openRoomForWatchers(room);
+  updateLobby();
+}
+
+// 観戦する側
+$('watchBtn').addEventListener('click', ()=>{
+  if(!gasReady){ showToast('GASのURLが未設定です'); return; }
+  show('startScreen',false); show('watchScreen',true); show('watchChoice',true); $('watchStatus').textContent = '';
+});
+$('watchBackBtn').addEventListener('click', ()=>leaveToStart());
+$('leaveWatchBtn').addEventListener('click', ()=>leaveToStart());
+$('watchJoinBtn').addEventListener('click', watchJoin);
+async function watchJoin(){
+  const code = $('watchCodeInput').value.trim();
+  if(!/^\d{4}$/.test(code)){ showToast('4けたの番号を入れてください'); return; }
+  closeLink(); role = 'spectator'; phase = 'idle'; ghost = null; ghostMod = -1; specAimH = specAimG = null; scores = [0,0];
+  show('watchChoice',false); $('watchStatus').textContent = 'つないでいます…';
+  link = new Link(); link.onmsg = onSpecMsg;
+  link.onopen = ()=>{ $('watchStatus').textContent = 'つながりました。\nゲームの開始を待っています…'; };
+  link.onclose = ()=>{ showToast('通信が切れました'); leaveToStart(); };
+  try{ await link.watch(code); }
+  catch(e){
+    if(link && !link.dead){
+      showToast(e.message==='full' ? '満員です（観戦は4人までです）' : '部屋が見つかりませんでした');
+      leaveToStart();
+    }
+  }
+}
+function specEnterGame(){
+  show('watchScreen',false); show('resultScreen',false); show('specBar',true);
+  clearInterval(specRankTimer); specRankTimer = null;
+}
+function startSpecPlay(mod, pt, tl, idx, n){
+  currentWaveEmoji = WAVE_EMOJI[mod]; waveIdx = idx; waveCount = n;
+  ghost = new WAVE_CONTROLLERS[mod](VW, VH, pt); ghostMod = mod;
+  playTime = pt; waveTimeLeft = tl; fx = []; hintText = '';
+  phase = 'play'; show('waveIntro',false); show('hud',true); show('waveHintBar',true);
+}
+function applySpecSnapshot(m){
+  if(!ghost || m.md!==ghostMod) return;
+  try{ Object.assign(ghost, JSON.parse(m.w, snapReviver)); }catch(e){ return; }
+  scores = m.sc; waveTimeLeft = m.tl; hintText = m.hint; specAimH = m.ha || null; specAimG = m.ga || null;
+  fx = (m.fx||[]).map(o=>Object.assign(new HitScore(o.x,o.y,o.score,o.color), {t:o.t}));
+}
+async function specRankRefresh(){
+  const st = await gasGetState();
+  renderRanking((st && st.ranking && st.ranking[modeKey()]) || [], !!st);
+  $('myRankText').textContent = '次のゲームを待っています…';
+}
+function specShowResult(sc){
+  phase = 'ended'; scores = sc;
+  show('hud',false); show('waveHintBar',false); show('waveIntro',false); show('watchScreen',false);
+  const label = (BOARDS.find(b=>b[0]===modeKey())||[,''])[1];
+  $('resultScoreText').textContent = cfg.players===2 ? `ホスト ${sc[0]} ／ ゲスト ${sc[1]}（合計 ${sc[0]+sc[1]}）` : `Score: ${sc[0]}`;
+  $('playAgainBtn').textContent = '観戦をやめる';
+  $('rankTitle').textContent = `Ranking（${label}）`;
+  recName = null; recScore = null;
+  show('resultScreen',true); show('specBar',false);
+  specRankRefresh();
+  clearInterval(specRankTimer);
+  specRankTimer = setInterval(()=>{ if(role!=='spectator' || phase!=='ended'){ clearInterval(specRankTimer); return; } specRankRefresh(); }, 5000);
+}
+function onSpecMsg(m){
+  switch(m.t){
+    case 'sync':
+      cfg.len = m.len; cfg.input = 'ar'; cfg.players = m.players; waveCount = m.n; scores = m.sc || [0,0];
+      if(m.phase==='intro'){ specEnterGame(); showIntro(m.mod, m.idx, m.n, 0); }
+      else if(m.phase==='play'){ specEnterGame(); startSpecPlay(m.mod, m.pt, m.tl, m.idx, m.n); }
+      else if(m.phase==='ended'){ specShowResult(scores); }
+      else { $('watchStatus').textContent = 'つながりました。\nゲームの開始を待っています…'; }
+      break;
+    case 'start':
+      cfg.len = m.len; if(m.players) cfg.players = m.players; waveCount = m.n; scores = [0,0]; fx = []; specAimH = specAimG = null;
+      specEnterGame(); break;
+    case 'intro': specEnterGame(); showIntro(m.mod, m.idx, m.n, 0); break;
+    case 'play': startSpecPlay(m.mod, m.pt, m.pt, waveIdx, waveCount); break;
+    case 's': applySpecSnapshot(m); break;
+    case 'end': specShowResult(m.sc); break;
+  }
+}
 
 /* ---------------- スコアボード ---------------- */
 let boardData = {}, sbTimer = null;
@@ -1489,11 +1717,11 @@ function renderBoard(){
 /* ---------------- メインループ ---------------- */
 let lastT = performance.now(), lastSnap = 0, lastAimSend = 0;
 function netTick(now){
-  if(!link || !link.open) return;
+  if(!(link && link.open) && !watchers.some(w=>w.open)) return;
   if(role==='host' && phase==='play' && controller && now-lastSnap > 66){
     lastSnap = now;
-    sendFast({ t:'s', w:JSON.stringify(controller, snapReplacer), tl:waveTimeLeft, sc:scores, hint:controller.hint(),
-      fx:fx.map(f=>({x:f.x,y:f.y,score:f.score,color:f.color,t:f.t})), ha:{x:aim.x,y:aim.y} });
+    sendFast({ t:'s', md:pendingMod, w:JSON.stringify(controller, snapReplacer), tl:waveTimeLeft, sc:scores, hint:controller.hint(),
+      fx:fx.map(f=>({x:f.x,y:f.y,score:f.score,color:f.color,t:f.t})), ha:{x:aim.x,y:aim.y}, ga:remoteAim });
   }
   if(role==='guest' && phase==='play' && now-lastAimSend > 66){
     lastAimSend = now; sendFast({t:'a', x:aim.x, y:aim.y});
@@ -1501,6 +1729,16 @@ function netTick(now){
 }
 function render(){
   const inGame = (phase==='play' || phase==='intro');
+  if(role==='spectator'){
+    ctx.fillStyle = '#14100c'; ctx.fillRect(0,0,W(),H());
+    if(inGame){
+      renderWorld(vctx,VW,VH);
+      const s = Math.min(W()/VW, H()/VH), dw = VW*s, dh = VH*s, dx = (W()-dw)/2, dy = (H()-dh)/2;
+      ctx.drawImage(vcanvas,dx,dy,dw,dh);
+      ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2; ctx.strokeRect(dx,dy,dw,dh);
+    }
+    canvas.style.cursor = 'default'; return;
+  }
   if(arActive){
     if(inGame){ renderWorld(vctx,VW,VH); drawARComposite(); } else clearARBack();
   } else {
@@ -1521,7 +1759,7 @@ function loop(now){
     } else if(phase==='play' || phase==='ended'){ dispYaw = dispTo; }
     stepAim();
   }
-  if(role!=='guest'){
+  if(role==='solo' || role==='host'){
     if(phase==='intro'){ introT += dt; if(introT >= INTRO_SEC) beginPlay(); }
     else if(phase==='play') updatePlay(dt);
   } else if(phase==='intro'){
